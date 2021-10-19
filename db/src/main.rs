@@ -3,7 +3,7 @@ mod file_system;
 use file_system::{FileSystem, FS};
 
 fn main() {
-    const PAGE_SIZE: usize = 4096;
+    const PAGE_SIZE: usize = 256;
 
     let file = "file1";
 
