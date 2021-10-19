@@ -1,17 +1,29 @@
 extern crate nix;
 
 use std::collections::HashMap;
-use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
-use std::{collections::HashSet, fs::File, io, io::ErrorKind};
+use std::os::unix::io::RawFd;
+use std::{fs::File, io, io::ErrorKind};
 
-type PageID = u32;
+type PageID = i64;
+const PAGE_SIZE: usize = 4096;
+
 pub trait FileSystem {
     fn create_file(&mut self, name: &str) -> Result<(), io::Error>;
-    fn open_file(&mut self, name: &str) -> Result<RawFd, io::Error>;
-    fn close_file(&mut self, fileid: RawFd) -> Result<(), nix::Error>;
+    fn open_file(&mut self, name: &str) -> Result<RawFd, nix::Error>;
+    fn close_file(&mut self, fd: RawFd) -> Result<(), nix::Error>;
     fn remove_file(&mut self, name: &str) -> Result<(), io::Error>;
-    fn read_page(&mut self, fileid: RawFd, page: PageID) -> Result<(), io::Error>;
-    fn write_page(&mut self, fileid: RawFd, page: PageID, content: &str) -> Result<(), io::Error>;
+    fn read_page(
+        &mut self,
+        fd: RawFd,
+        page: PageID,
+        buf: &mut [u8; PAGE_SIZE],
+    ) -> Result<usize, nix::Error>;
+    fn write_page(
+        &mut self,
+        fd: RawFd,
+        page: PageID,
+        buf: &[u8; PAGE_SIZE],
+    ) -> Result<usize, nix::Error>;
 }
 
 pub struct FS {
@@ -49,36 +61,32 @@ impl FileSystem for FS {
             }
         }
     }
-    fn open_file(&mut self, name: &str) -> Result<RawFd, io::Error> {
+    fn open_file(&mut self, name: &str) -> Result<RawFd, nix::Error> {
         if !self.name2raw.contains_key(name) {
-            Err(io::Error::new(
-                ErrorKind::NotFound,
-                format!("Unable to find file {:?}.", name),
-            ))
+            Err(nix::Error::invalid_argument())
         } else {
             // println!("opening... {:?}", self.name2raw.get(name));
             match self.name2raw.get(name).unwrap() {
                 None => {
-                    let f: RawFd = File::open(name)?.into_raw_fd();
+                    // let f: RawFd = File::open(name)?.into_raw_fd();
+                    let f: RawFd =
+                        nix::fcntl::open(name, nix::fcntl::O_RDWR, nix::sys::stat::S_IXUSR)?;
                     *self.name2raw.get_mut(name).unwrap() = Some(f);
                     self.raw2name.insert(f, name.to_string());
                     Ok(f)
                 }
-                Some(_) => Err(io::Error::new(
-                    ErrorKind::AlreadyExists,
-                    format!("File {:?} is already opened.", name),
-                )),
+                Some(_) => Err(nix::Error::invalid_argument()),
             }
         }
         // nix::fcntl::open("path", "oflag", "mode");
     }
-    fn close_file(&mut self, fileid: RawFd) -> Result<(), nix::Error> {
-        match self.raw2name.get(&fileid) {
+    fn close_file(&mut self, fd: RawFd) -> Result<(), nix::Error> {
+        match self.raw2name.get(&fd) {
             None => Err(nix::Error::invalid_argument()),
             Some(name) => {
                 *self.name2raw.get_mut(name).unwrap() = None;
-                self.raw2name.remove(&fileid);
-                nix::unistd::close(fileid)
+                self.raw2name.remove(&fd);
+                nix::unistd::close(fd)
             }
         }
     }
@@ -96,19 +104,31 @@ impl FileSystem for FS {
                     self.name2raw.remove(name);
                     Ok(std::fs::remove_file(name)?)
                 }
-                Some(fileid) => {
-                    self.raw2name.remove(fileid);
+                Some(fd) => {
+                    self.raw2name.remove(fd);
                     self.name2raw.remove(name);
                     Ok(std::fs::remove_file(name)?)
                 }
             }
         }
     }
-    fn read_page(&mut self, fileid: RawFd, page: PageID) -> Result<(), io::Error> {
-        Ok(())
+    fn read_page(
+        &mut self,
+        fd: RawFd,
+        page: PageID,
+        buf: &mut [u8; PAGE_SIZE],
+    ) -> Result<usize, nix::Error> {
+        nix::unistd::lseek(fd, page, nix::unistd::Whence::SeekSet)?;
+        nix::unistd::read(fd, buf)
     }
-    fn write_page(&mut self, fileid: RawFd, page: PageID, content: &str) -> Result<(), io::Error> {
-        Ok(())
+    fn write_page(
+        &mut self,
+        fd: RawFd,
+        page: PageID,
+        buf: &[u8; PAGE_SIZE],
+    ) -> Result<usize, nix::Error> {
+        nix::unistd::lseek(fd, page, nix::unistd::Whence::SeekSet)?;
+        nix::unistd::write(fd, buf)
     }
 }
 
@@ -189,5 +209,26 @@ mod tests {
         fs.close_file(fd2).unwrap();
         fs.remove_file("file1").unwrap();
         fs.remove_file("file2").unwrap();
+    }
+
+    #[test]
+    fn test_read_write_page() {
+        let mut fs = FS::new();
+        fs.create_file("file1").unwrap();
+        let fd1 = fs.open_file("file1").unwrap();
+
+        let mut buf: [u8; PAGE_SIZE] = [1; PAGE_SIZE];
+        for i in 0..PAGE_SIZE {
+            buf[i] = 97 + (i as u8) % 26;
+        }
+
+        fs.write_page(fd1, 0, &buf).unwrap();
+        let mut buf2: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        fs.read_page(fd1, 0, &mut buf2).unwrap();
+
+        fs.close_file(fd1).unwrap();
+
+        // println!("buf2: {:?}", buf2);
+        assert_eq!(buf, buf2);
     }
 }
