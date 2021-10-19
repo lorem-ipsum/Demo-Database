@@ -10,8 +10,8 @@ pub trait FileSystem {
     fn open_file(&mut self, name: &str) -> Result<RawFd, io::Error>;
     fn close_file(&mut self, fileid: RawFd) -> Result<(), nix::Error>;
     fn remove_file(&mut self, name: &str) -> Result<(), io::Error>;
-    fn read_page(&mut self, name: &str, page: PageID) -> Result<(), io::Error>;
-    fn write_page(&mut self, name: &str, page: PageID, content: &str) -> Result<(), io::Error>;
+    fn read_page(&mut self, fileid: RawFd, page: PageID) -> Result<(), io::Error>;
+    fn write_page(&mut self, fileid: RawFd, page: PageID, content: &str) -> Result<(), io::Error>;
 }
 
 pub struct FS {
@@ -83,12 +83,31 @@ impl FileSystem for FS {
         }
     }
     fn remove_file(&mut self, name: &str) -> Result<(), io::Error> {
+        if !self.name2raw.contains_key(name) {
+            // If the file doesn't exist.
+            Err(io::Error::new(
+                ErrorKind::NotFound,
+                format!("Unable to find file {:?}.", name),
+            ))
+        } else {
+            // The file exists, but may be open.
+            match self.name2raw.get(name).unwrap() {
+                None => {
+                    self.name2raw.remove(name);
+                    Ok(std::fs::remove_file(name)?)
+                }
+                Some(fileid) => {
+                    self.raw2name.remove(fileid);
+                    self.name2raw.remove(name);
+                    Ok(std::fs::remove_file(name)?)
+                }
+            }
+        }
+    }
+    fn read_page(&mut self, fileid: RawFd, page: PageID) -> Result<(), io::Error> {
         Ok(())
     }
-    fn read_page(&mut self, name: &str, page: PageID) -> Result<(), io::Error> {
-        Ok(())
-    }
-    fn write_page(&mut self, name: &str, page: PageID, content: &str) -> Result<(), io::Error> {
+    fn write_page(&mut self, fileid: RawFd, page: PageID, content: &str) -> Result<(), io::Error> {
         Ok(())
     }
 }
@@ -145,5 +164,30 @@ mod tests {
         if fs.close_file(fd1).is_ok() {
             panic!("fuck");
         }
+    }
+
+    #[test]
+    fn test_create_open_close_remove_recreate() {
+        let mut fs = FS::new();
+        fs.create_file("file1").unwrap();
+        fs.create_file("file2").unwrap();
+        fs.open_file("file1").unwrap();
+        // remove a open file
+        fs.remove_file("file1").unwrap();
+
+        // remoe a closed file
+        fs.remove_file("file2").unwrap();
+
+        // recreate removed file
+        fs.create_file("file1").unwrap();
+        fs.create_file("file2").unwrap();
+
+        // open recreated file
+        let fd1 = fs.open_file("file1").unwrap();
+        let fd2 = fs.open_file("file2").unwrap();
+        fs.close_file(fd1).unwrap();
+        fs.close_file(fd2).unwrap();
+        fs.remove_file("file1").unwrap();
+        fs.remove_file("file2").unwrap();
     }
 }
