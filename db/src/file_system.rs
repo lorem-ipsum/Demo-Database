@@ -1,63 +1,94 @@
+extern crate nix;
+
+use std::collections::HashMap;
+use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 use std::{collections::HashSet, fs::File, io, io::ErrorKind};
 
-pub fn print_message() {
-    println!("fuck");
-}
-
 type PageID = u32;
-trait FileSystem {
-    fn create_file(self: &mut Self, name: &str) -> Result<(), io::Error>;
-    fn open_file(self: &mut Self, name: &str) -> Result<(), io::Error>;
-    fn close_file(self: &mut Self, name: &str) -> Result<(), io::Error>;
-    fn remove_file(self: &mut Self, name: &str) -> Result<(), io::Error>;
-    fn read_page(self: &mut Self, name: &str, page: PageID) -> Result<(), io::Error>;
-    fn write_page(
-        self: &mut Self,
-        name: &str,
-        page: PageID,
-        content: &str,
-    ) -> Result<(), io::Error>;
+pub trait FileSystem {
+    fn create_file(&mut self, name: &str) -> Result<(), io::Error>;
+    fn open_file(&mut self, name: &str) -> Result<RawFd, io::Error>;
+    fn close_file(&mut self, fileid: RawFd) -> Result<(), nix::Error>;
+    fn remove_file(&mut self, name: &str) -> Result<(), io::Error>;
+    fn read_page(&mut self, name: &str, page: PageID) -> Result<(), io::Error>;
+    fn write_page(&mut self, name: &str, page: PageID, content: &str) -> Result<(), io::Error>;
 }
 
-struct FS {
-    file_names: HashSet<String>,
+pub struct FS {
+    name2raw: HashMap<String, Option<RawFd>>,
+    raw2name: HashMap<RawFd, String>,
+}
+
+impl FS {
+    pub fn new() -> FS {
+        FS {
+            name2raw: HashMap::new(),
+            raw2name: HashMap::new(),
+        }
+    }
+    pub fn _print_info(&self) {
+        println!("name2raw = {:?}", self.name2raw);
+        println!("raw2name = {:?}", self.raw2name);
+    }
 }
 
 impl FileSystem for FS {
-    fn create_file(self: &mut Self, name: &str) -> Result<(), io::Error> {
-        if self.file_names.contains(name) {
-            return Err(io::Error::new(
+    fn create_file(&mut self, name: &str) -> Result<(), io::Error> {
+        if self.name2raw.contains_key(name) {
+            Err(io::Error::new(
                 ErrorKind::AlreadyExists,
                 format!("Unable to create existing file {:?}.", name),
-            ));
+            ))
         } else {
             match File::create(&name) {
-                Ok(f) => {
-                    self.file_names.insert(name.to_owned());
-                    return Ok(());
+                Ok(_) => {
+                    self.name2raw.insert(name.to_owned(), None);
+                    Ok(())
                 }
-                Err(e) => return Err(e),
+                Err(e) => Err(e),
             }
         }
     }
-    fn open_file(self: &mut Self, name: &str) -> Result<(), io::Error> {
+    fn open_file(&mut self, name: &str) -> Result<RawFd, io::Error> {
+        if !self.name2raw.contains_key(name) {
+            Err(io::Error::new(
+                ErrorKind::NotFound,
+                format!("Unable to find file {:?}.", name),
+            ))
+        } else {
+            // println!("opening... {:?}", self.name2raw.get(name));
+            match self.name2raw.get(name).unwrap() {
+                None => {
+                    let f: RawFd = File::open(name)?.into_raw_fd();
+                    *self.name2raw.get_mut(name).unwrap() = Some(f);
+                    self.raw2name.insert(f, name.to_string());
+                    Ok(f)
+                }
+                Some(_) => Err(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    format!("File {:?} is already opened.", name),
+                )),
+            }
+        }
+        // nix::fcntl::open("path", "oflag", "mode");
+    }
+    fn close_file(&mut self, fileid: RawFd) -> Result<(), nix::Error> {
+        match self.raw2name.get(&fileid) {
+            None => Err(nix::Error::invalid_argument()),
+            Some(name) => {
+                *self.name2raw.get_mut(name).unwrap() = None;
+                self.raw2name.remove(&fileid);
+                nix::unistd::close(fileid)
+            }
+        }
+    }
+    fn remove_file(&mut self, name: &str) -> Result<(), io::Error> {
         Ok(())
     }
-    fn close_file(self: &mut Self, name: &str) -> Result<(), io::Error> {
+    fn read_page(&mut self, name: &str, page: PageID) -> Result<(), io::Error> {
         Ok(())
     }
-    fn remove_file(self: &mut Self, name: &str) -> Result<(), io::Error> {
-        Ok(())
-    }
-    fn read_page(self: &mut Self, name: &str, page: PageID) -> Result<(), io::Error> {
-        Ok(())
-    }
-    fn write_page(
-        self: &mut Self,
-        name: &str,
-        page: PageID,
-        content: &str,
-    ) -> Result<(), io::Error> {
+    fn write_page(&mut self, name: &str, page: PageID, content: &str) -> Result<(), io::Error> {
         Ok(())
     }
 }
@@ -69,23 +100,50 @@ mod tests {
 
     #[test]
     fn test_create_success() {
-        let mut fs = FS {
-            file_names: HashSet::<String>::new(),
-        };
+        let mut fs = FS::new();
         fs.create_file("file1").unwrap();
         fs.create_file("file2").unwrap();
     }
 
     #[test]
-    #[should_panic]
     fn test_create_failure() {
-        let mut fs = FS {
-            file_names: HashSet::<String>::new(),
-        };
+        let mut fs = FS::new();
         fs.create_file("file1").unwrap();
         fs.create_file("file2").unwrap();
-        if fs.create_file("file1").is_err() {
+        if fs.create_file("file1").is_ok() {
             panic!("fuck");
         };
+    }
+
+    #[test]
+    fn test_open_close_success() {
+        let mut fs = FS::new();
+        fs.create_file("file1").unwrap();
+        fs.create_file("file2").unwrap();
+        let fd1 = fs.open_file("file1").unwrap();
+        let fd2 = fs.open_file("file2").unwrap();
+        fs.close_file(fd1).unwrap();
+        fs.close_file(fd2).unwrap();
+    }
+
+    #[test]
+    fn test_double_opening() {
+        let mut fs = FS::new();
+        fs.create_file("file1").unwrap();
+        fs.open_file("file1").unwrap();
+        if fs.open_file("file1").is_ok() {
+            panic!("fuck");
+        }
+    }
+
+    #[test]
+    fn test_double_closing() {
+        let mut fs = FS::new();
+        fs.create_file("file1").unwrap();
+        let fd1 = fs.open_file("file1").unwrap();
+        fs.close_file(fd1).unwrap();
+        if fs.close_file(fd1).is_ok() {
+            panic!("fuck");
+        }
     }
 }
