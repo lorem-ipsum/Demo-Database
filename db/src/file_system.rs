@@ -121,12 +121,9 @@ impl FS {
             {
                 if self.buf_manager.borrow().dirty[index] {
                     // write back
-                    self.write_page(
-                        fd,
-                        self.buf_manager.borrow().dest[index].1,
-                        &self.buf_manager.borrow().buf[index],
-                    )
-                    .unwrap();
+                    let page = self.buf_manager.borrow().dest[index].1.clone();
+                    let buf = self.buf_manager.borrow().buf[index].clone();
+                    self.write_page(fd, page, &buf).unwrap();
                 }
                 self.buf_manager.borrow_mut().valid[index] = false;
             }
@@ -233,7 +230,7 @@ impl FileSystem for FS {
             self.buf_manager.borrow().get(fd, page, buf);
             Ok(buf.len())
         } else {
-            nix::unistd::lseek(fd, page, nix::unistd::Whence::SeekSet)?;
+            nix::unistd::lseek(fd, page * PAGE_SIZE as i64, nix::unistd::Whence::SeekSet)?;
             nix::unistd::read(fd, buf)?;
             self._create_buf(fd, page, buf);
             Ok(buf.len())
@@ -249,7 +246,7 @@ impl FileSystem for FS {
             self.buf_manager.borrow_mut().update(fd, page, buf);
             Ok(buf.len())
         } else {
-            nix::unistd::lseek(fd, page, nix::unistd::Whence::SeekSet)?;
+            nix::unistd::lseek(fd, page * PAGE_SIZE as i64, nix::unistd::Whence::SeekSet)?;
             nix::unistd::write(fd, buf)?;
             self._create_buf(fd, page, buf);
             Ok(buf.len())
@@ -259,56 +256,75 @@ impl FileSystem for FS {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::TryInto;
+
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
 
     #[test]
     fn test_create_success() {
+        let filename1 = "file1_test_create_success";
+        let filename2 = "file2_test_create_success";
         let mut fs = FS::new();
-        fs.create_file("file1").unwrap();
-        fs.create_file("file2").unwrap();
+        fs.create_file(filename1).unwrap();
+        fs.create_file(filename2).unwrap();
+        fs.remove_file(filename1).unwrap();
+        fs.remove_file(filename2).unwrap();
     }
 
     #[test]
     fn test_create_failure() {
+        let filename1 = "file1_test_create_failure";
+        let filename2 = "file2_test_create_failure";
         let mut fs = FS::new();
-        fs.create_file("file1").unwrap();
-        fs.create_file("file2").unwrap();
-        if fs.create_file("file1").is_ok() {
+        fs.create_file(filename1).unwrap();
+        fs.create_file(filename2).unwrap();
+        if fs.create_file(filename1).is_ok() {
             panic!("fuck");
         };
+        fs.remove_file(filename1).unwrap();
+        fs.remove_file(filename2).unwrap();
     }
 
     #[test]
     fn test_open_close_success() {
+        let filename1 = "file1_test_open_close_success";
+        let filename2 = "file2_test_open_close_success";
+
         let mut fs = FS::new();
-        fs.create_file("file1").unwrap();
-        fs.create_file("file2").unwrap();
-        let fd1 = fs.open_file("file1").unwrap();
-        let fd2 = fs.open_file("file2").unwrap();
+        fs.create_file(filename1).unwrap();
+        fs.create_file(filename2).unwrap();
+        let fd1 = fs.open_file(filename1).unwrap();
+        let fd2 = fs.open_file(filename2).unwrap();
         fs.close_file(fd1).unwrap();
         fs.close_file(fd2).unwrap();
+        fs.remove_file(filename1).unwrap();
+        fs.remove_file(filename2).unwrap();
     }
 
     #[test]
     fn test_double_opening() {
+        let filename = "file_test_double_opening";
         let mut fs = FS::new();
-        fs.create_file("file1").unwrap();
-        fs.open_file("file1").unwrap();
-        if fs.open_file("file1").is_ok() {
+        fs.create_file(filename).unwrap();
+        fs.open_file(filename).unwrap();
+        if fs.open_file(filename).is_ok() {
             panic!("fuck");
         }
+        fs.remove_file(filename).unwrap();
     }
 
     #[test]
     fn test_double_closing() {
+        let filename = "file_test_double_closing";
         let mut fs = FS::new();
-        fs.create_file("file1").unwrap();
-        let fd1 = fs.open_file("file1").unwrap();
+        fs.create_file(filename).unwrap();
+        let fd1 = fs.open_file(filename).unwrap();
         fs.close_file(fd1).unwrap();
         if fs.close_file(fd1).is_ok() {
             panic!("fuck");
         }
+        fs.remove_file(filename).unwrap();
     }
 
     #[test]
@@ -338,9 +354,10 @@ mod tests {
 
     #[test]
     fn test_read_write_page() {
+        let filename = "file_test_read_write_page";
         let mut fs = FS::new();
-        fs.create_file("file1").unwrap();
-        let fd1 = fs.open_file("file1").unwrap();
+        fs.create_file(filename).unwrap();
+        let fd1 = fs.open_file(filename).unwrap();
 
         let mut buf: [u8; PAGE_SIZE] = [1; PAGE_SIZE];
         for i in 0..PAGE_SIZE {
@@ -351,9 +368,50 @@ mod tests {
         let mut buf2: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
         fs.read_page(fd1, 0, &mut buf2).unwrap();
 
+        // remove file without closing first
+        fs.remove_file(filename).unwrap();
+
+        assert_eq!(buf, buf2);
+    }
+
+    #[test]
+    fn test_1000pages_write_read() {
+        let filename = "file_test_1000pages_write_read";
+        let mut data: [u8; 1000 * PAGE_SIZE] = [0; 1000 * PAGE_SIZE];
+        for i in 0..1000 * PAGE_SIZE {
+            data[i] = i as u8;
+        }
+
+        let mut fs = FS::new();
+        fs.create_file(filename).unwrap();
+        let fd1 = fs.open_file(filename).unwrap();
+
+        for page in 0..1000 {
+            fs.write_page(
+                fd1,
+                page,
+                &data[page as usize * PAGE_SIZE as usize..(page + 1) as usize * PAGE_SIZE as usize]
+                    .try_into()
+                    .unwrap(),
+            )
+            .unwrap();
+        }
+
         fs.close_file(fd1).unwrap();
 
-        // println!("buf2: {:?}", buf2);
-        assert_eq!(buf, buf2);
+        let fd2 = fs.open_file(filename).unwrap();
+
+        let mut buf2: [u8; PAGE_SIZE] = [1; PAGE_SIZE];
+
+        for page in 0..1000 {
+            fs.read_page(fd2, page, &mut buf2).unwrap();
+
+            assert_eq!(
+                data[page as usize * PAGE_SIZE as usize..(page + 1) as usize * PAGE_SIZE as usize],
+                buf2
+            )
+        }
+
+        fs.remove_file(filename).unwrap();
     }
 }
