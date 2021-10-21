@@ -1,14 +1,13 @@
 extern crate nix;
 
+use crate::common::{BUF_SIZE, FD_FIELD, PAGE_FIELD, PAGE_SIZE};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
 use std::{fs::File, io, io::ErrorKind};
 
 type PageID = i64;
-const PAGE_SIZE: usize = 256;
 type Page = [u8; PAGE_SIZE];
-const BUF_SIZE: usize = 1024;
 
 pub trait FileSystem {
     fn create_file(&mut self, name: &str) -> Result<(), io::Error>;
@@ -48,9 +47,6 @@ impl BufManager {
     /// ____________:____________________
     ///
 
-    const FD_FIELD: usize = 2;
-    const PAGE_FIELD: usize = 8;
-
     pub fn new() -> BufManager {
         BufManager {
             buf: [[0; PAGE_SIZE]; BUF_SIZE],
@@ -80,12 +76,12 @@ impl BufManager {
     }
 
     fn _index(&self, fd: RawFd, page: PageID) -> usize {
-        let fd1 = fd % (1 << BufManager::FD_FIELD);
+        let fd1 = fd % (1 << FD_FIELD);
         assert!(fd1 < 4);
-        let page1 = page % (1 << BufManager::PAGE_FIELD);
+        let page1 = page % (1 << PAGE_FIELD);
         assert!(page1 < 256);
 
-        let index: usize = (fd1 << BufManager::PAGE_FIELD) as usize + page1 as usize;
+        let index: usize = (fd1 << PAGE_FIELD) as usize + page1 as usize;
         assert!(index < 1024);
 
         index
@@ -112,9 +108,9 @@ impl FS {
     /// If the page is dirty, write back.
     ///
     fn _file_leave_cache(&self, fd: RawFd) {
-        let fd1 = fd % (1 << BufManager::FD_FIELD);
-        let start = (fd1 << BufManager::PAGE_FIELD) as usize;
-        let end = ((fd1 + 1) << BufManager::PAGE_FIELD) as usize;
+        let fd1 = fd % (1 << FD_FIELD);
+        let start = (fd1 << PAGE_FIELD) as usize;
+        let end = ((fd1 + 1) << PAGE_FIELD) as usize;
         for index in start..end {
             if self.buf_manager.borrow().valid[index]
                 && self.buf_manager.borrow().dest[index].0 == fd
@@ -375,10 +371,10 @@ mod tests {
     }
 
     #[test]
-    fn test_1000pages_write_read() {
-        let filename = "file_test_1000pages_write_read";
-        let mut data: [u8; 1000 * PAGE_SIZE] = [0; 1000 * PAGE_SIZE];
-        for i in 0..1000 * PAGE_SIZE {
+    fn test_100pages_write_read() {
+        let filename = "file_test_100pages_write_read";
+        let mut data: [u8; 100 * PAGE_SIZE] = [0; 100 * PAGE_SIZE];
+        for i in 0..100 * PAGE_SIZE {
             data[i] = i as u8;
         }
 
@@ -386,7 +382,7 @@ mod tests {
         fs.create_file(filename).unwrap();
         let fd1 = fs.open_file(filename).unwrap();
 
-        for page in 0..1000 {
+        for page in 0..100 {
             fs.write_page(
                 fd1,
                 page,
@@ -403,7 +399,7 @@ mod tests {
 
         let mut buf2: [u8; PAGE_SIZE] = [1; PAGE_SIZE];
 
-        for page in 0..1000 {
+        for page in 0..100 {
             fs.read_page(fd2, page, &mut buf2).unwrap();
 
             assert_eq!(
